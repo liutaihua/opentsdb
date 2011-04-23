@@ -1,2 +1,1 @@
 export TZ=Asia/Shanghai
-JVMARGS="$JVMARGS -Dorg.hbase.async.cdh3b3"
