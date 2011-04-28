@@ -107,6 +107,8 @@ final class GraphHandler implements HttpRpc {
       doGraph(tsdb, query);
     } catch (IOException e) {
       query.internalError(e);
+    } catch (IllegalArgumentException e) {
+      query.badRequest(e.getMessage());
     }
   }
 
@@ -260,19 +262,7 @@ final class GraphHandler implements HttpRpc {
         buf.append(",\"timing\":").append(query.processingTimeMillis())
           .append('}');
         query.sendReply(buf);
-        final String json_path = basepath + ".json";
-        try {
-          final FileOutputStream json_cache = new FileOutputStream(json_path);
-          try {
-            json_cache.write(buf.toString().getBytes());
-          } finally {
-            json_cache.close();
-          }
-        } catch (FileNotFoundException e) {
-          logError(query, "Failed to create JSON cache file " + json_path, e);
-        } catch (IOException e) {
-          logError(query, "Failed to write JSON cache file " + json_path, e);
-        }
+        writeFile(query, basepath + ".json", buf.toString().getBytes());
       } else {
           if (query.hasQueryStringParam("png")) {
             query.sendFile(basepath + ".png", max_age);
@@ -407,13 +397,16 @@ final class GraphHandler implements HttpRpc {
   private boolean staleCacheFile(final HttpQuery query,
                                  final long max_age,
                                  final File cachedfile) {
+    final long mtime = cachedfile.lastModified() / 1000;
+    if (mtime <= 0) {
+      return true;  // File doesn't exist, or can't be read.
+    }
     // Queries that don't specify an end-time must be handled carefully,
     // since time passes and we may need to regenerate the results in case
     // new data points have arrived in the mean time.
     final String end = query.getQueryStringParam("end");
     if (end == null || end.endsWith("ago")) {
       // How many seconds stale?
-      final long mtime = cachedfile.lastModified() / 1000;
       final long staleness = System.currentTimeMillis() / 1000 - mtime;
       if (staleness < 0) {  // Can happen if the mtime is "in the future".
         logWarn(query, "Not using file @ " + cachedfile + " with weird"
@@ -431,6 +424,30 @@ final class GraphHandler implements HttpRpc {
       }
     }
     return false;
+  }
+
+  /**
+   * Writes the given byte array into a file.
+   * This function logs an error but doesn't throw if it fails.
+   * @param query The query being handled (for logging purposes).
+   * @param path The path to write to.
+   * @param contents The contents to write into the file.
+   */
+  private static void writeFile(final HttpQuery query,
+                                final String path,
+                                final byte[] contents) {
+    try {
+      final FileOutputStream out = new FileOutputStream(path);
+      try {
+        out.write(contents);
+      } finally {
+        out.close();
+      }
+    } catch (FileNotFoundException e) {
+      logError(query, "Failed to create file " + path, e);
+    } catch (IOException e) {
+      logError(query, "Failed to write file " + path, e);
+    }
   }
 
   /**
@@ -491,7 +508,7 @@ final class GraphHandler implements HttpRpc {
                                        final String basepath) {
     final String json_path = basepath + ".json";
     File json_cache = new File(json_path);
-    if (!json_cache.exists() || staleCacheFile(query, max_age, json_cache)) {
+    if (staleCacheFile(query, max_age, json_cache)) {
       return null;
     }
     final byte[] json = readFile(query, json_cache, 4096);
@@ -662,7 +679,17 @@ final class GraphHandler implements HttpRpc {
       }
       throw new GnuplotException(new String(stderr));
     }
+    // Remove the files for stderr/stdout if they're empty.
+    deleteFileIfEmpty(basepath + ".out");
+    deleteFileIfEmpty(basepath + ".err");
     return nplotted;
+  }
+
+  private static void deleteFileIfEmpty(final String path) {
+    final File file = new File(path);
+    if (file.length() <= 0) {
+      file.delete();
+    }
   }
 
   /**
@@ -732,6 +759,7 @@ final class GraphHandler implements HttpRpc {
    * @param query The HTTP query for {@code /q}.
    * @return The corresponding {@link Query} objects.
    * @throws BadRequestException if the query was malformed.
+   * @throws IllegalArgumentException if the metric or tags were malformed.
    */
   private static Query[] parseQuery(final TSDB tsdb, final HttpQuery query) {
     final List<String> ms = query.getQueryStringParams("m");
@@ -753,7 +781,7 @@ final class GraphHandler implements HttpRpc {
       final Aggregator agg = getAggregator(parts[0]);
       i--;  // Move to the last part (the metric name).
       final HashMap<String, String> parsedtags = new HashMap<String, String>();
-      final String metric = parseMetricAndTags(parts[i], parsedtags);
+      final String metric = Tags.parseWithMetric(parts[i], parsedtags);
       final boolean rate = "rate".equals(parts[--i]);
       if (rate) {
         i--;  // Move to the next part.
@@ -784,40 +812,6 @@ final class GraphHandler implements HttpRpc {
       tsdbqueries[nqueries++] = tsdbquery;
     }
     return tsdbqueries;
-  }
-
-  /**
-   * Parses the metric and tags out of the given string.
-   * @param metric A string of the form "metric" or "metric{tag=value,...}".
-   * @param tags The map to populate with the tags parsed out of the first
-   * argument.
-   * @return The name of the metric.
-   * @throws BadRequestException if the metric is malformed.
-   */
-  private static String parseMetricAndTags(final String metric,
-                                           final HashMap<String, String> tags) {
-    final int curly = metric.indexOf('{');
-    if (curly < 0) {
-      return metric;
-    }
-    final int len = metric.length();
-    if (metric.charAt(len - 1) != '}') {  // "foo{"
-      throw new BadRequestException("Missing '}' at the end of: " + metric);
-    } else if (curly == len - 1) {  // "foo{}"
-      return metric.substring(0, len - 2);
-    }
-    // substring the tags out of "foo{a=b,...,x=y}" and parse them.
-    for (final String tag
-         : Tags.splitString(metric.substring(curly + 1, len - 1), ',')) {
-      try {
-        Tags.parse(tags, tag);
-      } catch (IllegalArgumentException e) {
-        throw new BadRequestException("When parsing tag '" + tag
-                                      + "': " + e.getMessage());
-      }
-    }
-    // Return the "foo" part of "foo{a=b,...,x=y}"
-    return metric.substring(0, curly);
   }
 
   /**
