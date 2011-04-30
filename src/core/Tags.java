@@ -72,13 +72,17 @@ public final class Tags {
    * @param tags The HashMap into which to store the tag.
    * @param tag A String of the form "tag=value".
    * @throws IllegalArgumentException if the tag is malformed.
-   * @throws IllegalArgumentException if the tag was already in tags.
+   * @throws IllegalArgumentException if the tag was already in tags with a
+   * different value.
    */
   public static void parse(final HashMap<String, String> tags,
                            final String tag) {
     final String[] kv = splitString(tag, '=');
     if (kv.length != 2 || kv[0].length() <= 0 || kv[1].length() <= 0) {
       throw new IllegalArgumentException("invalid tag: " + tag);
+    }
+    if (kv[1].equals(tags.get(kv[0]))) {
+        return;
     }
     if (tags.get(kv[0]) != null) {
       throw new IllegalArgumentException("duplicate tag: " + tag
@@ -279,7 +283,9 @@ public final class Tags {
     if (s == null) {
       throw new IllegalArgumentException("Invalid " + what + ": null");
     }
-    for (char c : s.toCharArray()) {
+    final int n = s.length();
+    for (int i = 0; i < n; i++) {
+      final char c = s.charAt(i);
       if (!(('a' <= c && c <= 'z')
             || ('A' <= c && c <= 'Z')
             || ('0' <= c && c <= '9')
